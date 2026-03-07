@@ -1,0 +1,400 @@
+#DATA SET TELAH DIUNDUH SEBELUMNYA 
+#memanggil library 
+library(DESeq2)
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
+library(pheatmap)
+library(ggrepel)
+
+
+#set the working directory 
+setwd("C:/Users/USER/Documents/Project Omicslite/Final Project")
+
+#Load the count data 
+count_data <- read.delim("Final Project.tsv", header=TRUE,row.names=1)
+
+colnames(count_data)
+head(count_data)
+
+#Load the sample information
+treatment_group <- c(rep("No_Diet_10w", 4), 
+                     rep("No_Diet_20w", 4), 
+                     rep("Diet_Restriction_20w", 4))
+
+#Make dataframe for sample info
+sample_info <- data.frame(
+  Treatment = treatment_group,
+  row.names = colnames(count_data)
+)
+
+colnames(sample_info)
+head(sample_info)
+all(colnames(count_data) == rownames(sample_info))
+
+#set factor levels
+sample_info$Treatment<- factor(sample_info$Treatment,
+                               levels= c("No_Diet_20w","Diet_Restriction_20w","No_Diet_10w"))
+
+levels(sample_info$Treatment)
+
+#data checking before creating a deseq object
+is.integer(count_data[1,1])
+
+#creat a deseq object and import data and sample information
+dds<- DESeqDataSetFromMatrix(countData = count_data,colData = sample_info, design = ~Treatment)
+
+#set the reference for the treatment factor
+dds$Treatment<- factor(dds$Treatment, levels = c("No_Diet_20w","Diet_Restriction_20w","No_Diet_10w"))
+
+#filter the genes
+keep <- rowSums(counts(dds)) >= 5
+dds <- dds[keep,]
+
+#menjalankan analisis Deseq
+dds <- DESeq(dds)
+
+deseq_result<-results(dds)
+head(deseq_result)
+
+#ubah Objek Deseq menjadi objek R (dataframe)
+deseq_result <- as.data.frame(deseq_result)
+class(deseq_result)
+
+#mengambil hasil table dengan meningkatkan p value
+deseq_result_ordered <- deseq_result[order(deseq_result$pvalue),]
+head(deseq_result_ordered)
+
+#Menerjemahkan kode ensemble id/ make queries
+library(biomaRt)
+
+#hubungkan ke database Ensembl Ikan Killfish
+mart <- useMart("ensembl", dataset = "nfurzeri_gene_ensembl")
+
+#konversi ensemble id menjadi gen symbol
+genes_info <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name', 'description'),
+                    filters = 'ensembl_gene_id',
+                    values = rownames(deseq_result), 
+                    mart = mart)
+
+#gabungkan dengan data deseq_result 
+deseq_result$ensembl_gene_id <- rownames(deseq_result)
+deseq_result_annotated <- merge(as.data.frame(deseq_result), genes_info, 
+                                by = "ensembl_gene_id", all.x = TRUE)
+
+#filter gen
+filter_gen <- deseq_result_annotated %>%
+  filter(padj < 0.01 & abs(log2FoldChange) > 1)
+
+#melihat hasil filter 
+dim(deseq_result)
+dim(filter_gen)
+resultsNames(dds)
+================================================================================
+  
+#VISUALISASI DATA 
+#PCA Plot
+#lakukan transformasi terlebih dahulu untuk mengurangi noise
+  vsd <- vst(dds, blind=FALSE)
+head(assay(vsd), 3)
+
+#membuat plot PCA sesuai perlakuan yang ingin di analisis
+vsd_filtered <- vsd[, vsd$Treatment %in% c("Diet_Restriction_20w", "No_Diet_20w")]
+
+
+pcaData <- plotPCA(vsd_filtered, intgroup="Treatment", returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+#visualisasi menggunakan ggplot2
+ggplot(pcaData, aes(PC1, PC2, color=Treatment, shape=Treatment)) +
+  geom_point(size=4) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) + 
+  coord_fixed() +
+  ggtitle("PCA Analysis")
+
+#BOXPLOT
+#filter perlakuan 
+samples_to_keep <- which(dds$Treatment %in% c("No_Diet_20w", "Diet_Restriction_20w"))
+dds_20w <- dds[, samples_to_keep]
+
+#ambil data count yang sudah difilter
+norm_counts_20w <- counts(dds_20w, normalized=TRUE)
+
+
+#visualisasi boxplot
+colors_20w <- c("palegreen4", "deeppink")
+par(mar = c(10, 5, 4, 2))
+boxplot(log2(norm_counts_20w + 1), 
+        col=colors_20w[as.factor(colData(dds_20w)$Treatment)], 
+        cex.axis=0.7, 
+        las=2, 
+        outline=FALSE,   
+        notch=TRUE,      
+        border="darkgrey", 
+        main="Distribusi Ekspresi gen Diet vs No Diet",
+        ylab="Log2 Normalized Counts")
+
+#visualisasi density plot
+#ambil data yang telah ternormalisasi
+vsd <- vst(dds, blind = FALSE)
+vst_counts <- assay(vsd)
+
+library(reshape2)
+vst_df <- melt(vst_counts)
+colnames(vst_df) <- c("Gene", "Sample", "Expression")
+
+ggplot(vst_df, aes(x = Expression, color = Sample)) +
+  geom_density() +
+  theme_minimal() +
+  labs(title = "Density Plot: Diet Vs non Diet",
+       x = "Normalized Expression",
+       y = "Density")
+
+
+#DIAGRAM VENN
+#hitung jumlah gen
+total_gen <- nrow(deseq_result)
+jumlah_deg <- nrow(filter_gen)
+jumlah_non_deg <- total_gen - jumlah_deg
+
+cat("Gen Signifikan (DEG):", jumlah_deg, "\n")
+cat("Gen Tidak Signifikan (Non-DEG):", jumlah_non_deg, "\n")
+
+library(grid)
+library(VennDiagram)
+grid.newpage()
+venn_plot <- draw.single.venn(
+  area = jumlah_deg,
+  category = "Diagram Venn: Significant DEG, Padj<0.01",
+  fill = "palegreen",
+  alpha = 0.6,
+  lty = "solid",
+  lwd = 2,
+  col = "seagreen",
+  cex = 1.5,
+  cat.cex = 1.2,
+  cat.pos = 0, 
+  cat.dist = 0.05
+)
+
+#info gen non deg di pojok kiri atas 
+grid.text(paste0("Non-DEG: ", jumlah_non_deg), 
+          x = 0.15, y = 0.9, 
+          gp = gpar(col = "grey40", fontsize = 10, fontitalic = TRUE))
+
+
+#VOLCANO PLOT
+#jalankan Shrinkage untuk membersihkan noise
+resLFC <- lfcShrink(dds, coef="Treatment_Diet_Restriction_20w_vs_No_Diet_20w", type="apeglm")
+
+#ubah menjadi data frame
+LFC_df <- as.data.frame(resLFC)
+LFC_df$ensembl_gene_id <- rownames(LFC_df)
+
+plot_data <- merge(LFC_df, genes_info, by = "ensembl_gene_id", all.x = TRUE)
+
+#tidak dilakukan pengkategorian dan penentuan ambang batas karena jumlah gen signifikan telah difilter sebelumnya 
+#ambil gen signifikan yg telah di filter sebelumnya
+ids_168 <- filter_gen$ensembl_gene_id
+
+#penentuan gen up dan down berdasarkan hasil filter gen & shrinkage
+plot_data$diffexpressed <- "NO"
+plot_data$diffexpressed[plot_data$ensembl_gene_id %in% ids_168 & plot_data$log2FoldChange > 0] <- "UP"
+plot_data$diffexpressed[plot_data$ensembl_gene_id %in% ids_168 & plot_data$log2FoldChange < 0] <- "DOWN"
+
+#hitung jumlah gen 
+n_up <- sum(plot_data$diffexpressed == "UP", na.rm = TRUE)
+n_down <- sum(plot_data$diffexpressed == "DOWN", na.rm = TRUE)
+n_no <- sum(plot_data$diffexpressed == "NO", na.rm = TRUE)
+
+top_genes <- plot_data %>%
+  filter(diffexpressed != "NO") %>%
+  group_by(diffexpressed) %>%
+  slice_min(order_by = padj, n = 5) %>%
+  ungroup()
+
+#VISUALISASI VOLCANO PLOT
+ggplot(data=plot_data, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) +
+  geom_point(data=subset(plot_data, diffexpressed == "NO"), 
+             alpha=0.3, size=1.2) +
+  geom_point(data=subset(plot_data, diffexpressed != "NO"), 
+             alpha=0.8, size=1.2) +
+  
+  #tambah label nama gen dengan font lebih kecil
+  geom_text_repel(data=top_genes, 
+                   aes(label=external_gene_name), 
+                   size=2.8,              
+                   max.overlaps = Inf,    
+                   segment.size = 0.2,    
+                   box.padding = 0.5,
+                   fontface = "italic") +
+  
+  #pengaturan warna volcano plot
+  scale_color_manual(
+    values=c("DOWN"="blue", "NO"="black", "UP"="deeppink"),
+    labels=c(
+      paste0("DOWN (", n_down, ")"), 
+      paste0("NO (", n_no, ")"), 
+      paste0("UP (", n_up, ")")
+    )
+  ) +
+  
+  #judul plot
+  theme_minimal() +
+  labs(
+    title="Volcano Plot: Diet Vs Non Diet",
+    x="Log2 Fold Change",
+    y="-Log10 Adjusted P-value",
+    color="Diffexpressed"
+  ) +
+  theme(
+    text=element_text(size=12),
+    plot.title = element_text(face="bold", hjust=0.5),
+    legend.position = "right",
+    panel.grid.minor = element_blank() 
+  ) +
+  
+  
+  geom_vline(xintercept=c(-1, 1), col="gray80", linetype="dashed", size=0.3) +
+  geom_hline(yintercept=-log10(0.01), col="gray80", linetype="dashed", size=0.3)
+
+#PLOT MEAN DIFFERENCE (MD PLOT)
+ggplot(plot_data, aes(x = baseMean, y = log2FoldChange, color = diffexpressed)) +
+  scale_x_log10() +
+
+#visualisasi
+#atur posisi titik 
+geom_point(data = subset(plot_data, diffexpressed == "NO"), 
+             alpha = 0.2, size = 1) +
+geom_point(data = subset(plot_data, diffexpressed != "NO"), 
+             alpha = 0.7, size = 1.2) +
+geom_hline(yintercept = 0, color = "grey2", linetype = "solid", size = 0.5) +
+  
+#pengaturan warna
+  scale_color_manual(
+    values = c("DOWN" = "blue", "NO" = "grey2", "UP" = "deeppink"),
+    labels = c(
+      paste0("DOWN (", n_down, ")"), 
+      paste0("NO (", n_no, ")"), 
+      paste0("UP (", n_up, ")")
+    )
+  ) +
+
+  theme_minimal() +
+  labs(
+    title = "MD Plot: Diet Vs non Diet",
+    subtitle = "Log2 Fold Change vs. Mean of Normalized Counts",
+    x = "Mean of Normalized Counts",
+    y = "Log2 Fold Change",
+    color = "Diffexpressed"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    panel.grid.minor = element_blank()
+  )
+  
+#HEATMAP
+#sinkronisasi data 
+#ambil 50 gen teratas
+top50_df <- filter_gen %>%
+  arrange(padj) %>%
+  head(50)
+top50_genes_ids <- top50_df$ensembl_gene_id
+top50_df$final_label <- ifelse(top50_df$external_gene_name == "" | is.na(top50_df$external_gene_name), 
+                               top50_df$ensembl_gene_id, 
+                               top50_df$external_gene_name)
+
+#ambil data VST 
+vsd_20w <- vst(dds_20w, blind = TRUE)
+
+#filter matriks VST dengan data gen id 
+heatmap_data_50 <- assay(vsd_20w)[top50_genes_ids, ]
+
+#ganti id ensemble menjadi nama gen 
+top50_genes_ids <- top50_df$ensembl_gene_id
+heatmap_data_50 <- assay(vsd_20w)[top50_genes_ids, ]
+rownames(heatmap_data_50) <- top50_df$final_label
+
+#normalisasi z-score
+heatmap_matrix_50 <- t(scale(t(heatmap_data_50)))
+
+pheatmap(heatmap_matrix_50, 
+         annotation_col = as.data.frame(colData(dds_20w)[, "Treatment", drop=FALSE]),
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         show_rownames = TRUE, 
+         fontsize_row = 7,
+         cellheight= 6,
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "Top 50 DEGs",
+         border_color = NA)
+
+
+================================================================================
+#ANALISIS FUNGSIONAL 
+#GENE ONTOLOGY (GO)
+library (clusterProfiler) 
+#Ambil seluruh gen signifikan
+sig_genes_ids <- filter_gen$ensembl_gene_id  
+
+#ambil pemetaan GO ID untuk semua gen
+go_annotations <- getBM(attributes = c('ensembl_gene_id', 'go_id', 'name_1006'),
+                        filters = 'ensembl_gene_id',
+                        values = rownames(deseq_result),
+                        mart = mart)
+go2gene <- go_annotations[go_annotations$go_id != "", c("go_id", "ensembl_gene_id")]
+go2name <- go_annotations[go_annotations$go_id != "", c("go_id", "name_1006")]
+
+#ambil ID gen yang signifikan (padj < 0.01 & |log2FC| > 1)
+sig_genes <- filter_gen$ensembl_gene_id
+
+#jjalankan Enrichment
+ego <- enricher(gene = sig_genes,
+                TERM2GENE = go2gene,
+                TERM2NAME = go2name,
+                pvalueCutoff = 0.05)
+head(ego)
+
+#Visualisasi
+dotplot(ego, showCategory = 15) + 
+  ggtitle("GO Analysis: Impact of Diet Restriction")+
+  theme(
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5), 
+    axis.text.y = element_text(size = 10),                          
+    axis.text.x = element_text(size = 10),                            
+    legend.title = element_text(size = 10),                          
+    legend.text = element_text(size = 8)                             
+  )
+
+#Analisis KEGG
+#ambil Entrez ID dari biomaRt
+kegg_conv <- getBM(attributes = c('ensembl_gene_id', 'entrezgene_id'),
+                   filters = 'ensembl_gene_id',
+                   values = filter_gen$ensembl_gene_id,
+                   mart = mart)
+
+#gabungkan dengan data filter gen 
+kegg_data <- merge(kegg_conv, filter_gen, by = "ensembl_gene_id")
+#hilangkan data NA
+kegg_data <- kegg_data[!is.na(kegg_data$entrezgene_id), ]
+
+#jalankan enrichment KEGG
+ekegg <- enrichKEGG(gene = kegg_data$entrezgene_id,
+                    organism = 'nfu',  # nfu = Nothobranchius furzeri
+                    pvalueCutoff = 0.2,
+qvalueCutoff = 0.2)
+
+head(ekegg)
+nrow(ekegg)
+nrow(kegg_data)
+
+#Visualisasi
+dotplot(ekegg, showCategory = 6) + 
+  ggtitle("KEGG Pathway-Diet Restriction") +
+  theme(
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+    axis.text.y = element_text(size = 9)
+  )
+
