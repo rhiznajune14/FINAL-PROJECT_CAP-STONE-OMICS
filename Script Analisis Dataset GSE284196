@@ -12,7 +12,7 @@ library(ggrepel)
 setwd("C:/Users/USER/Documents/Project Omicslite/Final Project")
 
 #Load the count data 
-count_data <- read.delim("Final Project.tsv", header=TRUE,row.names=1)
+count_data <- read.delim("Dataset GSE284196.tsv", header=TRUE,row.names=1)
 
 colnames(count_data)
 head(count_data)
